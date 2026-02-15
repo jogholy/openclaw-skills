@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """
-技术指标分析模块
-支持：MA、MACD、KDJ、RSI、布林带
+技术指标分析模块 v2
+使用 stock_analysis 库进行指标计算
 数据源：同花顺日线 API
 """
 import argparse
 import json
-import os
 import sys
 import urllib.request
 import re
 from datetime import datetime, timedelta, timezone
+import pandas as pd
+
+# 导入新的指标库
+from stock_analysis import indicators
 
 CST = timezone(timedelta(hours=8))
 
 # ── 数据获取 ──────────────────────────────────────────
-
-def get_market_prefix(code):
-    if code.startswith(('6', '5')):
-        return 'hs_' + code
-    else:
-        return 'hs_' + code
 
 def fetch_daily_klines(code, days=250):
     """获取日K线数据（同花顺）"""
@@ -33,7 +30,6 @@ def fetch_daily_klines(code, days=250):
     with urllib.request.urlopen(req, timeout=15) as resp:
         raw = resp.read().decode('utf-8', errors='replace')
 
-    # 解析 JSONP: quotebridge_v6_line_hs_XXXXXX_01_last({...})
     m = re.search(r'\((\{.*\})\)', raw, re.DOTALL)
     if not m:
         raise RuntimeError(f"无法解析K线数据: {code}")
@@ -48,22 +44,6 @@ def fetch_daily_klines(code, days=250):
         if len(parts) < 6:
             continue
         klines.append({
-            'date': parts[0],       # YYYYMMDD
-            'open': float(parts[1]),
-            'close': float(parts[2]) if parts[2] else float(parts[1]),
-            'high': float(parts[3]) if parts[3] else float(parts[1]),
-            'low': float(parts[4]) if parts[4] else float(parts[1]),
-            'volume': int(parts[5]) if parts[5] else 0,
-        })
-
-    # 修正：同花顺格式是 open,high,low,close
-    # 实际验证：字段顺序是 date,open,high,low,close,volume,amount,...
-    corrected = []
-    for line in lines[-days:]:
-        parts = line.split(',')
-        if len(parts) < 6:
-            continue
-        corrected.append({
             'date': parts[0],
             'open': float(parts[1]),
             'high': float(parts[2]),
@@ -72,267 +52,187 @@ def fetch_daily_klines(code, days=250):
             'volume': int(parts[5]),
         })
 
-    return name, corrected
+    return name, klines
 
-# ── 指标计算 ──────────────────────────────────────────
+def klines_to_dataframe(klines):
+    """转换K线数据为 DataFrame"""
+    df = pd.DataFrame(klines)
+    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+    df.set_index('date', inplace=True)
+    return df
 
-def calc_ma(closes, period):
-    """简单移动平均"""
-    if len(closes) < period:
-        return [None] * len(closes)
-    result = [None] * (period - 1)
-    for i in range(period - 1, len(closes)):
-        result.append(round(sum(closes[i - period + 1:i + 1]) / period, 4))
-    return result
+# ── 指标分析 ──────────────────────────────────────────
 
-def calc_ema(values, period):
-    """指数移动平均"""
-    if not values:
-        return []
-    k = 2 / (period + 1)
-    ema = [values[0]]
-    for i in range(1, len(values)):
-        ema.append(round(ema[-1] * (1 - k) + values[i] * k, 4))
-    return ema
-
-def calc_macd(closes, fast=12, slow=26, signal=9):
-    """MACD"""
-    ema_fast = calc_ema(closes, fast)
-    ema_slow = calc_ema(closes, slow)
-    dif = [round(f - s, 4) for f, s in zip(ema_fast, ema_slow)]
-    dea = calc_ema(dif, signal)
-    macd = [round((d - e) * 2, 4) for d, e in zip(dif, dea)]
-    return dif, dea, macd
-
-def calc_kdj(klines, n=9, m1=3, m2=3):
-    """KDJ"""
-    k_vals, d_vals, j_vals = [], [], []
-    k, d = 50.0, 50.0
-    for i in range(len(klines)):
-        start = max(0, i - n + 1)
-        highs = [kl['high'] for kl in klines[start:i + 1]]
-        lows = [kl['low'] for kl in klines[start:i + 1]]
-        hn = max(highs)
-        ln = min(lows)
-        c = klines[i]['close']
-        rsv = ((c - ln) / (hn - ln) * 100) if hn != ln else 50
-        k = round((m1 - 1) / m1 * k + 1 / m1 * rsv, 2)
-        d = round((m2 - 1) / m2 * d + 1 / m2 * k, 2)
-        j = round(3 * k - 2 * d, 2)
-        k_vals.append(k)
-        d_vals.append(d)
-        j_vals.append(j)
-    return k_vals, d_vals, j_vals
-
-def calc_rsi(closes, period=14):
-    """RSI"""
-    if len(closes) < period + 1:
-        return [None] * len(closes)
-    result = [None] * period
-    gains, losses = [], []
-    for i in range(1, period + 1):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    rs = avg_gain / avg_loss if avg_loss != 0 else 100
-    result.append(round(100 - 100 / (1 + rs), 2))
-    for i in range(period + 1, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        avg_gain = (avg_gain * (period - 1) + max(diff, 0)) / period
-        avg_loss = (avg_loss * (period - 1) + max(-diff, 0)) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else 100
-        result.append(round(100 - 100 / (1 + rs), 2))
-    return result
-
-def calc_boll(closes, period=20, k=2):
-    """布林带"""
-    mid = calc_ma(closes, period)
-    upper, lower = [], []
-    for i in range(len(closes)):
-        if mid[i] is None:
-            upper.append(None)
-            lower.append(None)
-        else:
-            start = max(0, i - period + 1)
-            std = (sum((c - mid[i]) ** 2 for c in closes[start:i + 1]) / period) ** 0.5
-            upper.append(round(mid[i] + k * std, 4))
-            lower.append(round(mid[i] - k * std, 4))
-    return mid, upper, lower
-
-# ── 综合分析 ──────────────────────────────────────────
-
-def analyze(code):
-    """对单只股票做完整技术分析"""
-    name, klines = fetch_daily_klines(code, 250)
-    if len(klines) < 30:
-        return {"error": f"数据不足（仅 {len(klines)} 天）"}
-
-    closes = [k['close'] for k in klines]
+def analyze_stock(code, days=250):
+    """分析股票技术指标"""
+    name, klines = fetch_daily_klines(code, days)
+    
+    if len(klines) < 60:
+        return {
+            'error': f'数据不足（需要至少60天，当前{len(klines)}天）',
+            'code': code,
+            'name': name
+        }
+    
+    df = klines_to_dataframe(klines)
     latest = klines[-1]
-
-    # MA
-    ma5 = calc_ma(closes, 5)
-    ma10 = calc_ma(closes, 10)
-    ma20 = calc_ma(closes, 20)
-    ma60 = calc_ma(closes, 60)
-
-    # MACD
-    dif, dea, macd_hist = calc_macd(closes)
-
-    # KDJ
-    k_vals, d_vals, j_vals = calc_kdj(klines)
-
-    # RSI
-    rsi6 = calc_rsi(closes, 6)
-    rsi14 = calc_rsi(closes, 14)
-
-    # BOLL
-    boll_mid, boll_upper, boll_lower = calc_boll(closes)
-
-    # 最新值
+    
+    # 使用新库计算指标
+    try:
+        # MA 系统
+        ma_dict = indicators.ma_system(df['close'])
+        
+        # MACD
+        macd_line, signal_line, histogram = indicators.macd(df['close'])
+        
+        # RSI
+        rsi = indicators.rsi(df['close'])
+        
+        # KDJ
+        k, d, j = indicators.kdj(df['high'], df['low'], df['close'])
+        
+        # 布林带
+        upper, middle, lower = indicators.bollinger_bands(df['close'])
+        
+        # OBV
+        obv = indicators.obv(df['close'], df['volume'])
+        
+    except Exception as e:
+        return {
+            'error': f'指标计算失败: {str(e)}',
+            'code': code,
+            'name': name
+        }
+    
+    # 构建结果
     result = {
-        "code": code,
-        "name": name,
-        "date": latest['date'],
-        "close": latest['close'],
-        "open": latest['open'],
-        "high": latest['high'],
-        "low": latest['low'],
-        "indicators": {
-            "ma5": ma5[-1],
-            "ma10": ma10[-1],
-            "ma20": ma20[-1],
-            "ma60": ma60[-1] if ma60[-1] else None,
-            "macd": {"dif": dif[-1], "dea": dea[-1], "hist": macd_hist[-1]},
-            "kdj": {"k": k_vals[-1], "d": d_vals[-1], "j": j_vals[-1]},
-            "rsi6": rsi6[-1],
-            "rsi14": rsi14[-1],
-            "boll": {
-                "upper": boll_upper[-1],
-                "mid": boll_mid[-1],
-                "lower": boll_lower[-1],
-            },
+        'code': code,
+        'name': name,
+        'date': latest['date'],
+        'price': latest['close'],
+        'volume': latest['volume'],
+        'ma': {
+            'ma5': round(ma_dict['MA5'].iloc[-1], 2) if not pd.isna(ma_dict['MA5'].iloc[-1]) else None,
+            'ma10': round(ma_dict['MA10'].iloc[-1], 2) if not pd.isna(ma_dict['MA10'].iloc[-1]) else None,
+            'ma20': round(ma_dict['MA20'].iloc[-1], 2) if not pd.isna(ma_dict['MA20'].iloc[-1]) else None,
+            'ma60': round(ma_dict['MA60'].iloc[-1], 2) if not pd.isna(ma_dict['MA60'].iloc[-1]) else None,
         },
-        "signals": [],
+        'macd': {
+            'dif': round(macd_line.iloc[-1], 4) if not pd.isna(macd_line.iloc[-1]) else None,
+            'dea': round(signal_line.iloc[-1], 4) if not pd.isna(signal_line.iloc[-1]) else None,
+            'macd': round(histogram.iloc[-1], 4) if not pd.isna(histogram.iloc[-1]) else None,
+        },
+        'kdj': {
+            'k': round(k.iloc[-1], 2) if not pd.isna(k.iloc[-1]) else None,
+            'd': round(d.iloc[-1], 2) if not pd.isna(d.iloc[-1]) else None,
+            'j': round(j.iloc[-1], 2) if not pd.isna(j.iloc[-1]) else None,
+        },
+        'rsi': {
+            'rsi14': round(rsi.iloc[-1], 2) if not pd.isna(rsi.iloc[-1]) else None,
+        },
+        'boll': {
+            'upper': round(upper.iloc[-1], 2) if not pd.isna(upper.iloc[-1]) else None,
+            'middle': round(middle.iloc[-1], 2) if not pd.isna(middle.iloc[-1]) else None,
+            'lower': round(lower.iloc[-1], 2) if not pd.isna(lower.iloc[-1]) else None,
+        },
+        'obv': {
+            'value': int(obv.iloc[-1]) if not pd.isna(obv.iloc[-1]) else None,
+        }
     }
-
-    # ── 信号检测 ──
+    
+    # 生成信号
     signals = []
-
-    # MA 金叉/死叉
-    if ma5[-1] and ma10[-1] and ma5[-2] and ma10[-2]:
-        if ma5[-2] <= ma10[-2] and ma5[-1] > ma10[-1]:
-            signals.append({"type": "buy", "name": "MA5/10金叉", "strength": 6})
-        elif ma5[-2] >= ma10[-2] and ma5[-1] < ma10[-1]:
-            signals.append({"type": "sell", "name": "MA5/10死叉", "strength": 6})
-
-    if ma5[-1] and ma20[-1] and ma5[-2] and ma20[-2]:
-        if ma5[-2] <= ma20[-2] and ma5[-1] > ma20[-1]:
-            signals.append({"type": "buy", "name": "MA5/20金叉", "strength": 7})
-        elif ma5[-2] >= ma20[-2] and ma5[-1] < ma20[-1]:
-            signals.append({"type": "sell", "name": "MA5/20死叉", "strength": 7})
-
-    # MACD 金叉/死叉
-    if len(dif) >= 2 and len(dea) >= 2:
-        if dif[-2] <= dea[-2] and dif[-1] > dea[-1]:
-            signals.append({"type": "buy", "name": "MACD金叉", "strength": 7})
-        elif dif[-2] >= dea[-2] and dif[-1] < dea[-1]:
-            signals.append({"type": "sell", "name": "MACD死叉", "strength": 7})
-
-    # KDJ 超买超卖
-    if k_vals[-1] < 20 and d_vals[-1] < 20:
-        signals.append({"type": "buy", "name": "KDJ超卖区", "strength": 5})
-    elif k_vals[-1] > 80 and d_vals[-1] > 80:
-        signals.append({"type": "sell", "name": "KDJ超买区", "strength": 5})
-
-    # KDJ 金叉/死叉
-    if len(k_vals) >= 2 and len(d_vals) >= 2:
-        if k_vals[-2] <= d_vals[-2] and k_vals[-1] > d_vals[-1] and k_vals[-1] < 50:
-            signals.append({"type": "buy", "name": "KDJ低位金叉", "strength": 7})
-        elif k_vals[-2] >= d_vals[-2] and k_vals[-1] < d_vals[-1] and k_vals[-1] > 50:
-            signals.append({"type": "sell", "name": "KDJ高位死叉", "strength": 7})
-
-    # RSI 超买超卖
-    if rsi6[-1] and rsi6[-1] < 20:
-        signals.append({"type": "buy", "name": "RSI6超卖(<20)", "strength": 6})
-    elif rsi6[-1] and rsi6[-1] > 80:
-        signals.append({"type": "sell", "name": "RSI6超买(>80)", "strength": 6})
-
-    # 布林带
-    if boll_lower[-1] and latest['close'] <= boll_lower[-1]:
-        signals.append({"type": "buy", "name": "触及布林下轨", "strength": 5})
-    elif boll_upper[-1] and latest['close'] >= boll_upper[-1]:
-        signals.append({"type": "sell", "name": "触及布林上轨", "strength": 5})
-
-    # 均线多头/空头排列
-    if ma5[-1] and ma10[-1] and ma20[-1]:
-        if ma5[-1] > ma10[-1] > ma20[-1]:
-            signals.append({"type": "buy", "name": "均线多头排列", "strength": 8})
-        elif ma5[-1] < ma10[-1] < ma20[-1]:
-            signals.append({"type": "sell", "name": "均线空头排列", "strength": 8})
-
-    result["signals"] = signals
+    
+    # MA 信号
+    price = latest['close']
+    if result['ma']['ma5'] and result['ma']['ma10']:
+        if result['ma']['ma5'] > result['ma']['ma10']:
+            signals.append('MA5上穿MA10（金叉）')
+        elif result['ma']['ma5'] < result['ma']['ma10']:
+            signals.append('MA5下穿MA10（死叉）')
+    
+    # MACD 信号
+    if result['macd']['dif'] and result['macd']['dea']:
+        if result['macd']['dif'] > result['macd']['dea'] and result['macd']['macd'] > 0:
+            signals.append('MACD金叉（多头）')
+        elif result['macd']['dif'] < result['macd']['dea'] and result['macd']['macd'] < 0:
+            signals.append('MACD死叉（空头）')
+    
+    # RSI 信号
+    if result['rsi']['rsi14']:
+        if result['rsi']['rsi14'] > 70:
+            signals.append('RSI超买（>70）')
+        elif result['rsi']['rsi14'] < 30:
+            signals.append('RSI超卖（<30）')
+    
+    # KDJ 信号
+    if result['kdj']['k'] and result['kdj']['d']:
+        if result['kdj']['k'] > 80 and result['kdj']['d'] > 80:
+            signals.append('KDJ超买区（>80）')
+        elif result['kdj']['k'] < 20 and result['kdj']['d'] < 20:
+            signals.append('KDJ超卖区（<20）')
+    
+    result['signals'] = signals
+    
     return result
 
-# ── 输出 ──────────────────────────────────────────────
-
-def print_analysis(result):
-    if "error" in result:
-        print(f"❌ {result['error']}")
-        return
-
-    ind = result["indicators"]
-    print(f"═══ {result['name']} ({result['code']}) 技术分析 ═══")
-    print(f"  日期: {result['date']}  收盘: {result['close']}")
-    print()
-
-    # MA
-    print(f"  📊 均线")
-    print(f"     MA5: {ind['ma5']}  MA10: {ind['ma10']}  MA20: {ind['ma20']}  MA60: {ind['ma60'] or 'N/A'}")
-
-    # MACD
-    m = ind['macd']
-    print(f"  📈 MACD")
-    print(f"     DIF: {m['dif']}  DEA: {m['dea']}  柱: {m['hist']}")
-
-    # KDJ
-    k = ind['kdj']
-    print(f"  🔄 KDJ")
-    print(f"     K: {k['k']}  D: {k['d']}  J: {k['j']}")
-
-    # RSI
-    print(f"  💪 RSI")
-    print(f"     RSI6: {ind['rsi6']}  RSI14: {ind['rsi14']}")
-
-    # BOLL
-    b = ind['boll']
-    print(f"  📏 布林带")
-    print(f"     上轨: {b['upper']}  中轨: {b['mid']}  下轨: {b['lower']}")
-
-    # 信号
-    signals = result.get("signals", [])
-    if signals:
-        print()
-        print(f"  ⚡ 信号")
-        for s in sorted(signals, key=lambda x: x['strength'], reverse=True):
-            icon = '🟢' if s['type'] == 'buy' else '🔴'
-            print(f"     {icon} {s['name']} (强度: {s['strength']}/10)")
-    else:
-        print(f"\n  ⚪ 当前无明显买卖信号")
+# ── CLI ──────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="股票技术指标分析")
-    parser.add_argument("code", help="股票代码")
-    parser.add_argument("--json", action="store_true", help="JSON 输出")
+    parser = argparse.ArgumentParser(description='股票技术指标分析（使用 stock_analysis 库）')
+    parser.add_argument('code', help='股票代码（如 300098）')
+    parser.add_argument('--days', type=int, default=250, help='获取天数（默认250）')
+    parser.add_argument('--json', action='store_true', help='输出JSON格式')
+    
     args = parser.parse_args()
+    
+    try:
+        result = analyze_stock(args.code, args.days)
+        
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            if 'error' in result:
+                print(f"❌ {result['error']}")
+                sys.exit(1)
+            
+            print(f"\n📊 {result['name']} ({result['code']}) - {result['date']}")
+            print(f"💰 最新价: ¥{result['price']}")
+            print(f"\n📈 均线系统:")
+            print(f"  MA5:  {result['ma']['ma5']}")
+            print(f"  MA10: {result['ma']['ma10']}")
+            print(f"  MA20: {result['ma']['ma20']}")
+            print(f"  MA60: {result['ma']['ma60']}")
+            
+            print(f"\n📉 MACD:")
+            print(f"  DIF: {result['macd']['dif']}")
+            print(f"  DEA: {result['macd']['dea']}")
+            print(f"  MACD: {result['macd']['macd']}")
+            
+            print(f"\n🎯 KDJ:")
+            print(f"  K: {result['kdj']['k']}")
+            print(f"  D: {result['kdj']['d']}")
+            print(f"  J: {result['kdj']['j']}")
+            
+            print(f"\n💪 RSI(14): {result['rsi']['rsi14']}")
+            
+            print(f"\n🎈 布林带:")
+            print(f"  上轨: {result['boll']['upper']}")
+            print(f"  中轨: {result['boll']['middle']}")
+            print(f"  下轨: {result['boll']['lower']}")
+            
+            print(f"\n📊 OBV: {result['obv']['value']:,}")
+            
+            if result['signals']:
+                print(f"\n🚨 交易信号:")
+                for sig in result['signals']:
+                    print(f"  • {sig}")
+            else:
+                print(f"\n✅ 无明显信号")
+    
+    except Exception as e:
+        print(f"❌ 错误: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    result = analyze(args.code)
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print_analysis(result)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
