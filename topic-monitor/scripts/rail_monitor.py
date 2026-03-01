@@ -286,8 +286,12 @@ def main():
     current_month, last_month = get_month_keywords()
     print(f"📅 搜索时间范围: {last_month} 和 {current_month}\n")
     
-    # 获取 API Key
-    api_key = os.environ.get("SERPER_API_KEY", "02b48b7cc39da01d6a3c6b6bb259f961e1e5333f")
+    # 获取 API Key（从环境变量或 OpenClaw 配置）
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key:
+        print("❌ 未找到 SERPER_API_KEY 环境变量")
+        print("请设置: export SERPER_API_KEY=your_api_key")
+        sys.exit(1)
     
     # 定义监控主题
     topics = [
