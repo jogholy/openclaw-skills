@@ -1,0 +1,34 @@
+{
+  "image": {
+    "xskill": {
+      "seedream-4.5": {
+        "id": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+        "price": 16,
+        "description": "最便宜，2K/4K"
+      },
+      "nano-banana-2": {
+        "id": "fal-ai/nano-banana-2",
+        "price": 32,
+        "description": "推荐，文字渲染"
+      }
+    }
+  },
+  "video": {
+    "xskill": {
+      "seedance-2.0": {
+        "id": "st-ai/super-seed2",
+        "price_per_second": 15,
+        "description": "Fast模式"
+      }
+    }
+  },
+  "audio": {
+    "xskill": {
+      "hailuo-tts": {
+        "id": "minimax/t2a",
+        "price_per_1k_chars": 35,
+        "description": "海螺HD"
+      }
+    }
+  }
+}
